@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/dexterlb/mpvipc"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
 )
@@ -70,14 +72,15 @@ func (j *Executor) wait() {
 }
 
 // Path will always be an absolute path
-func createMPVCommand(deviceName string, filename string, socketName string) []string {
+func createMPVCommand(deviceName string, socketName string) []string {
 	split := strings.Split(fixCmd(conf.Server.MPVCmdTemplate), " ")
 	for i, s := range split {
 		s = strings.ReplaceAll(s, "%d", deviceName)
-		s = strings.ReplaceAll(s, "%f", filename)
+		//s = strings.ReplaceAll(s, "%f", filename)
 		s = strings.ReplaceAll(s, "%s", socketName)
 		split[i] = s
 	}
+	split = append(split, "--idle")
 	return split
 }
 
@@ -114,6 +117,57 @@ func mpvCommand() (string, error) {
 		}
 	})
 	return mpvPath, mpvErr
+}
+
+func OpenMpvAndConnection(ctx context.Context, deviceName string) (*mpvipc.Connection, error) {
+	if _, err := mpvCommand(); err != nil {
+		return nil, err
+	}
+
+	tmpSocketName := socketName("mpv-ctrl-", ".socket")
+
+	args := createMPVCommand(deviceName, tmpSocketName)
+	exe, err := start(ctx, args)
+	if err != nil {
+		log.Error("Error starting mpv process", err)
+		return nil, err
+	}
+
+	// wait for socket to show up
+	err = waitForSocket(tmpSocketName, 3*time.Second, 100*time.Millisecond)
+	if err != nil {
+		log.Error("Error or timeout waiting for control socket", "socketname", tmpSocketName, err)
+		return nil, err
+	}
+
+	conn := mpvipc.NewConnection(tmpSocketName)
+	err = conn.Open()
+
+	if err != nil {
+		log.Error("Error opening new connection", err)
+		return nil, err
+	}
+	_ = exe
+	return conn, nil
+}
+
+func waitForSocket(path string, timeout time.Duration, pause time.Duration) error {
+	start := time.Now()
+	end := start.Add(timeout)
+	var retries int = 0
+
+	for {
+		fileInfo, err := os.Stat(path)
+		if err == nil && fileInfo != nil && !fileInfo.IsDir() {
+			log.Debug("Socket found", "retries", retries, "waitTime", time.Since(start))
+			return nil
+		}
+		if time.Now().After(end) {
+			return fmt.Errorf("timeout reached: %s", timeout)
+		}
+		time.Sleep(pause)
+		retries += 1
+	}
 }
 
 var (
